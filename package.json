@@ -6,8 +6,10 @@
   "bin": {
     "movizon": "./index.ts"
   },
+  "files": ["index.ts", "download.mjs", "README.md"],
   "scripts": {
-    "start": "bun run index.ts"
+    "start": "bun run index.ts",
+    "typecheck": "bun x tsc --noEmit"
   },
   "keywords": [
     "movie",
@@ -30,9 +32,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/figlet": "^1.7.0"
-  },
-  "peerDependencies": {
+    "@types/figlet": "^1.7.0",
     "typescript": "^5"
   },
   "trustedDependencies": [
