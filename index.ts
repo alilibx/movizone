@@ -2,10 +2,63 @@
 import chalk from "chalk";
 import inquirer from "inquirer";
 import ora from "ora";
+import boxen from "boxen";
+import Table from "cli-table3";
+import figlet from "figlet";
+import gradient from "gradient-string";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { createInterface } from "readline";
 import { fileURLToPath } from "url";
+
+// --- TUI Theme ---
+
+const movizonGradient = gradient(["#ff00ff", "#00ffff"]);
+
+function renderHeader(): string {
+  const ascii = figlet.textSync("MOVIZON", { font: "ANSI Shadow", horizontalLayout: "fitted" });
+  return boxen(movizonGradient.multiline(ascii) + "\n" + chalk.dim("  Movie Torrent Explorer"), {
+    padding: { top: 0, bottom: 0, left: 2, right: 2 },
+    borderStyle: "double",
+    borderColor: "magenta",
+    dimBorder: true,
+  });
+}
+
+function stripAnsi(str: string): string {
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function contextBar(left: string, right: string): string {
+  const width = Math.max(process.stdout.columns || 80, 60);
+  const innerWidth = width - 4; // boxen borders + padding
+  const visibleLeft = stripAnsi(left).length;
+  const visibleRight = stripAnsi(right).length;
+  const gap = innerWidth - visibleLeft - visibleRight;
+  const content = left + " ".repeat(Math.max(gap, 2)) + right;
+  return boxen(content, {
+    borderStyle: "single",
+    borderColor: "gray",
+    dimBorder: true,
+    padding: 0,
+  });
+}
+
+function navFooter(): string {
+  return boxen(
+    chalk.dim("  ↑↓ Navigate") + "  " +
+    chalk.dim("⏎ Select") + "  " +
+    chalk.dim("n Next") + "  " +
+    chalk.dim("p Prev") + "  " +
+    chalk.dim("b Back"),
+    {
+      borderStyle: "single",
+      borderColor: "gray",
+      dimBorder: true,
+      padding: 0,
+    }
+  );
+}
 
 // --- API Layer ---
 
@@ -299,11 +352,26 @@ function formatEta(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-async function downloadTorrent(magnet: string, movieTitle: string): Promise<void> {
+async function downloadTorrent(magnet: string, movieTitle: string, torrentInfo?: Torrent): Promise<void> {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const helperPath = join(scriptDir, "download.mjs");
 
-  console.log(chalk.dim(`\n  Saving to: ${DOWNLOAD_DIR}`));
+  // Movie info box
+  const infoLines = [
+    `${chalk.bold("Title:")}    ${chalk.white(movieTitle)}`,
+    torrentInfo ? `${chalk.bold("Quality:")}  ${chalk.cyan(torrentInfo.quality)} ${chalk.dim(torrentInfo.type)}` : "",
+    torrentInfo ? `${chalk.bold("Size:")}     ${torrentInfo.size}` : "",
+    torrentInfo ? `${chalk.bold("Codec:")}    ${chalk.dim(`${torrentInfo.video_codec} ${torrentInfo.audio_channels}ch`)}` : "",
+    `${chalk.bold("Save to:")}  ${chalk.dim(DOWNLOAD_DIR)}`,
+  ].filter(Boolean).join("\n");
+  console.log(boxen(infoLines, {
+    title: chalk.bold(" Download "),
+    titleAlignment: "left",
+    borderStyle: "round",
+    borderColor: "green",
+    padding: { top: 0, bottom: 0, left: 1, right: 1 },
+  }));
+
   console.log(chalk.dim("  Connecting to peers...\n"));
 
   return new Promise<void>((resolve) => {
@@ -316,6 +384,41 @@ async function downloadTorrent(magnet: string, movieTitle: string): Promise<void
     const decoder = new TextDecoder();
     let buffer = "";
     let totalSize = "";
+    let progressLines = 0;
+
+    function renderProgress(percent: string, downloaded: string, speed: string, eta: string, peers: number, progress: number) {
+      const barWidth = 50;
+      const filled = Math.round(progress * barWidth);
+      const bar = chalk.green("█".repeat(filled)) + chalk.dim("░".repeat(barWidth - filled));
+
+      const statsTable = new Table({
+        style: { head: [], border: ["gray"], compact: true },
+        colWidths: [16, 16, 14, 12],
+      });
+      statsTable.push([
+        `${chalk.dim("Downloaded")} ${chalk.white(downloaded + "/" + totalSize)}`,
+        `${chalk.dim("Speed")} ${chalk.cyan(speed)}`,
+        `${chalk.dim("ETA")} ${chalk.white(eta)}`,
+        `${chalk.dim("Peers")} ${chalk.white(String(peers))}`,
+      ]);
+
+      const content = `  ${bar}  ${chalk.bold(percent + "%")}\n${statsTable.toString()}`;
+      const frame = boxen(content, {
+        title: chalk.bold(" Progress "),
+        titleAlignment: "left",
+        borderStyle: "round",
+        borderColor: "cyan",
+        dimBorder: true,
+        padding: { top: 0, bottom: 0, left: 0, right: 0 },
+      });
+
+      // Clear previous progress frame
+      if (progressLines > 0) {
+        process.stdout.write(`\x1b[${progressLines}A\x1b[0J`);
+      }
+      process.stdout.write(frame + "\n");
+      progressLines = frame.split("\n").length;
+    }
 
     async function readOutput() {
       while (true) {
@@ -340,16 +443,19 @@ async function downloadTorrent(magnet: string, movieTitle: string): Promise<void
               const downloaded = formatBytes(msg.downloaded);
               const speed = formatSpeed(msg.speed);
               const eta = formatEta(msg.eta);
-              const barWidth = 30;
-              const filled = Math.round(msg.progress * barWidth);
-              const bar = chalk.green("\u2588".repeat(filled)) + chalk.dim("\u2591".repeat(barWidth - filled));
-              process.stdout.write(
-                `\r  ${bar} ${chalk.bold(percent + "%")}  ${downloaded}/${totalSize}  ${chalk.cyan(speed)}  ${chalk.dim(`ETA ${eta}`)}  ${chalk.dim(`${msg.peers} peers`)}  `
-              );
+              renderProgress(percent, downloaded, speed, eta, msg.peers, msg.progress);
             } else if (msg.type === "done") {
-              process.stdout.write("\r" + " ".repeat(120) + "\r");
-              console.log(chalk.green.bold(`  Download complete!`));
-              console.log(chalk.dim(`  Saved to: ${msg.path}\n`));
+              if (progressLines > 0) {
+                process.stdout.write(`\x1b[${progressLines}A\x1b[0J`);
+              }
+              console.log(boxen(
+                chalk.green.bold("  Download complete!") + "\n" + chalk.dim(`  Saved to: ${msg.path}`),
+                {
+                  borderStyle: "round",
+                  borderColor: "green",
+                  padding: { top: 0, bottom: 0, left: 0, right: 0 },
+                }
+              ));
             } else if (msg.type === "error") {
               console.log(chalk.red(`\n  Download error: ${msg.message}\n`));
             } else if (msg.type === "timeout") {
@@ -381,37 +487,83 @@ function healthColor(seeds: number): (text: string) => string {
   return chalk.red;
 }
 
-function displayMovieRow(movie: Movie, index: number): void {
-  const rating = movie.rating ? chalk.yellow(`★ ${movie.rating}`) : chalk.dim("unrated");
-  const genres = movie.genres?.slice(0, 3).join(", ") || "N/A";
-  const bestTorrent = movie.torrents?.reduce((best, t) => (t.seeds > (best?.seeds || 0) ? t : best), movie.torrents[0]);
-  const seeds = bestTorrent ? healthColor(bestTorrent.seeds)(`↑${bestTorrent.seeds}`) : chalk.dim("no torrents");
-  const quality = bestTorrent ? chalk.cyan(bestTorrent.quality) : "";
+function displayMovieTable(movies: Movie[]): void {
+  const table = new Table({
+    head: [
+      chalk.dim("#"),
+      chalk.bold("Title"),
+      chalk.dim("Year"),
+      chalk.yellow("Rating"),
+      chalk.cyan("Quality"),
+      chalk.green("Seeds"),
+      chalk.dim("Genre"),
+    ],
+    colWidths: [5, 32, 7, 9, 9, 8, 22],
+    style: { head: [], border: ["gray"], compact: false },
+    wordWrap: true,
+  });
 
-  console.log(
-    `  ${chalk.dim(`${index}.`)} ${chalk.bold.white(movie.title)} ${chalk.dim(`(${movie.year})`)}  ${rating}  ${quality}  ${seeds}  ${chalk.dim(genres)}`
-  );
+  for (let i = 0; i < movies.length; i++) {
+    const m = movies[i];
+    const rating = m.rating ? chalk.yellow(`★ ${m.rating}`) : chalk.dim("--");
+    const genres = m.genres?.slice(0, 2).join(", ") || "N/A";
+    const bestTorrent = m.torrents?.reduce((best, t) => (t.seeds > (best?.seeds || 0) ? t : best), m.torrents[0]);
+    const seeds = bestTorrent ? healthColor(bestTorrent.seeds)(`↑${bestTorrent.seeds}`) : chalk.dim("--");
+    const quality = bestTorrent ? chalk.cyan(bestTorrent.quality) : chalk.dim("--");
+
+    table.push([
+      chalk.dim(`${i + 1}`),
+      chalk.bold.white(m.title),
+      chalk.dim(`${m.year}`),
+      rating,
+      quality,
+      seeds,
+      chalk.dim(genres),
+    ]);
+  }
+
+  console.log(table.toString());
 }
 
 function displayMovieDetail(movie: Movie): void {
   console.log();
-  console.log(chalk.bold.white(`  ${movie.title}`) + chalk.dim(` (${movie.year})`));
-  console.log(chalk.dim("  " + "─".repeat(60)));
-  console.log(`  ${chalk.yellow(`★ ${movie.rating}`)}  ${chalk.dim("·")}  ${formatRuntime(movie.runtime)}  ${chalk.dim("·")}  ${movie.language?.toUpperCase() || "EN"}`);
-  console.log(`  ${chalk.dim("Genres:")} ${movie.genres?.join(", ") || "N/A"}`);
-  console.log(`  ${chalk.dim("IMDB:")} ${movie.imdb_code}`);
+
+  // Title bar
+  const titleLine = chalk.bold.white(movie.title) + chalk.dim(` (${movie.year})`) + "  " + chalk.dim(movie.imdb_code);
+  console.log(boxen(titleLine, {
+    borderStyle: "double",
+    borderColor: "magenta",
+    padding: { top: 0, bottom: 0, left: 1, right: 1 },
+  }));
+
+  // Info row
+  const ratingVal = movie.rating || 0;
+  const ratingBarFull = Math.round(ratingVal);
+  const ratingBar = chalk.yellow("█".repeat(ratingBarFull)) + chalk.dim("░".repeat(10 - ratingBarFull));
+  const infoTable = new Table({
+    style: { head: [], border: ["gray"], compact: true },
+    colWidths: [22, 12, 10, 30],
+  });
+  infoTable.push([
+    `${chalk.yellow(`★ ${ratingVal}`)} ${ratingBar}`,
+    chalk.white(formatRuntime(movie.runtime)),
+    chalk.white(movie.language?.toUpperCase() || "EN"),
+    chalk.dim(movie.genres?.join(", ") || "N/A"),
+  ]);
+  console.log(infoTable.toString());
 
   if (movie.yt_trailer_code) {
-    console.log(`  ${chalk.dim("Trailer:")} https://youtube.com/watch?v=${movie.yt_trailer_code}`);
+    console.log(chalk.dim(`  Trailer: https://youtube.com/watch?v=${movie.yt_trailer_code}`));
   }
 
-  console.log();
+  // Synopsis
   if (movie.summary) {
+    const wrapWidth = 68;
     const words = movie.summary.split(" ");
     const lines: string[] = [];
     let line = "";
     for (const word of words) {
-      if ((line + " " + word).length > 70) {
+      if ((line + " " + word).length > wrapWidth) {
         lines.push(line);
         line = word;
       } else {
@@ -419,24 +571,54 @@ function displayMovieDetail(movie: Movie): void {
       }
     }
     if (line) lines.push(line);
-    for (const l of lines.slice(0, 5)) {
-      console.log(`  ${chalk.dim(l)}`);
-    }
-    if (lines.length > 5) console.log(chalk.dim("  ..."));
+    const synopsisText = lines.slice(0, 6).join("\n") + (lines.length > 6 ? chalk.dim("\n...") : "");
+    console.log(boxen(synopsisText, {
+      title: chalk.bold(" Synopsis "),
+      titleAlignment: "left",
+      borderStyle: "round",
+      borderColor: "gray",
+      dimBorder: true,
+      padding: { top: 0, bottom: 0, left: 1, right: 1 },
+    }));
   }
 
-  console.log();
-  console.log(chalk.bold("  Torrents:"));
-
+  // Torrents
   if (movie.torrents?.length) {
+    const torrentTable = new Table({
+      head: [
+        chalk.cyan("Quality"),
+        chalk.dim("Type"),
+        chalk.white("Size"),
+        chalk.green("Seeds"),
+        chalk.red("Peers"),
+        chalk.dim("Codec"),
+        chalk.dim("Audio"),
+      ],
+      style: { head: [], border: ["gray"], compact: false },
+    });
+
     for (const t of movie.torrents) {
-      const seedColor = healthColor(t.seeds);
-      console.log(
-        `    ${chalk.cyan.bold(t.quality.padEnd(6))} ${chalk.dim(t.type.padEnd(7))} ${t.size.padEnd(10)} ${seedColor(`↑${t.seeds}`)} ${chalk.dim(`↓${t.peers}`)}  ${chalk.dim(`${t.video_codec} ${t.bit_depth}bit ${t.audio_channels}ch`)}`
-      );
+      torrentTable.push([
+        chalk.cyan.bold(t.quality),
+        chalk.dim(t.type),
+        t.size,
+        healthColor(t.seeds)(`↑${t.seeds}`),
+        chalk.dim(`↓${t.peers}`),
+        chalk.dim(t.video_codec || "--"),
+        chalk.dim(t.audio_channels ? `${t.audio_channels}ch` : "--"),
+      ]);
     }
+
+    console.log(boxen(torrentTable.toString(), {
+      title: chalk.bold(" Torrents "),
+      titleAlignment: "left",
+      borderStyle: "round",
+      borderColor: "cyan",
+      dimBorder: true,
+      padding: { top: 0, bottom: 0, left: 0, right: 0 },
+    }));
   } else {
-    console.log(chalk.dim("    No torrents available"));
+    console.log(chalk.dim("  No torrents available"));
   }
   console.log();
 }
@@ -502,9 +684,10 @@ async function searchAction(): Promise<void> {
       return;
     }
 
-    console.log(chalk.dim(`\n  Results for "${query}" · ${movies.length} found\n`));
-    movies.forEach((m, i) => displayMovieRow(m, i + 1));
     console.log();
+    console.log(contextBar(chalk.bold.magenta("MOVIZON"), chalk.dim(`Search: "${query}" · ${movies.length} found`)));
+    displayMovieTable(movies);
+    console.log(navFooter());
 
     const choices: any[] = movies.map((m, i) => ({
       name: `${i + 1}. ${m.title} (${m.year})`,
@@ -522,6 +705,7 @@ async function searchAction(): Promise<void> {
     }
   } catch (err: any) {
     spinner.stop();
+    if (isExitPromptError(err)) throw err;
     console.log(chalk.red(`\n  Error: ${err.message}\n`));
   }
 }
@@ -558,8 +742,9 @@ async function viewMovie(movie: Movie): Promise<void> {
       await selectTorrentAndCopyMagnet(movie);
     } else if (action.startsWith("dl_")) {
       const hash = action.slice(3);
+      const torrent = movie.torrents?.find((t) => t.hash === hash);
       const magnet = buildMagnet(hash, movie.title);
-      await downloadTorrent(magnet, movie.title);
+      await downloadTorrent(magnet, movie.title, torrent);
     }
   }
 }
@@ -603,9 +788,10 @@ async function showSimilar(movie: Movie): Promise<void> {
       return;
     }
 
-    console.log(chalk.dim(`\n  Similar to "${movie.title}":\n`));
-    res.data.movies.forEach((m, i) => displayMovieRow(m, i + 1));
     console.log();
+    console.log(contextBar(chalk.bold.magenta("MOVIZON"), chalk.dim(`Similar to "${movie.title}"`)));
+    displayMovieTable(res.data.movies);
+    console.log(navFooter());
 
     const choices: any[] = res.data.movies.map((m, i) => ({
       name: `${i + 1}. ${m.title} (${m.year})`,
@@ -623,6 +809,7 @@ async function showSimilar(movie: Movie): Promise<void> {
     }
   } catch (err: any) {
     spinner.stop();
+    if (isExitPromptError(err)) throw err;
     console.log(chalk.red(`\n  Error: ${err.message}\n`));
   }
 }
@@ -647,9 +834,10 @@ async function paginatedList(
         return;
       }
 
-      console.log(chalk.dim(`\n  ${label} · Page ${page} · ${res.data.movie_count.toLocaleString()} total\n`));
-      res.data.movies.forEach((m, i) => displayMovieRow(m, i + 1));
       console.log();
+      console.log(contextBar(chalk.bold.magenta("MOVIZON"), chalk.dim(`${label} · Page ${page} · ${res.data.movie_count.toLocaleString()} total`)));
+      displayMovieTable(res.data.movies);
+      console.log(navFooter());
 
       const choices: any[] = res.data.movies.map((m, i) => ({
         name: `${i + 1}. ${m.title} (${m.year})`,
@@ -672,58 +860,76 @@ async function paginatedList(
       }
     } catch (err: any) {
       spinner.stop();
+      if (isExitPromptError(err)) throw err;
       console.log(chalk.red(`\n  Error: ${err.message}\n`));
       browsing = false;
     }
   }
 }
 
+// --- SIGINT / Exit Handling ---
+
+function isExitPromptError(err: unknown): boolean {
+  return err instanceof Error && err.name === "ExitPromptError";
+}
+
+function exitGracefully(): never {
+  console.log(chalk.dim("\n  Bye!\n"));
+  process.exit(0);
+}
+
 // --- Main ---
 
 async function main(): Promise<void> {
   console.log();
-  console.log(chalk.bold.magenta("  Movizon") + chalk.dim(" — Movie Torrent Explorer"));
-  console.log(chalk.dim("  " + "─".repeat(40)));
+  console.log(renderHeader());
   console.log(chalk.dim(`  Downloads: ${DOWNLOAD_DIR}`));
   console.log();
 
   let running = true;
 
   while (running) {
-    const { action } = await inquirer.prompt([
-      {
-        type: "list",
-        name: "action",
-        message: "What do you want to do?",
-        choices: [
-          { name: "Search movies", value: "search" },
-          { name: "Browse movies", value: "browse" },
-          { name: "Trending now", value: "trending" },
-          { name: "Top rated", value: "top" },
-          { name: "Exit", value: "exit" },
-        ],
-      },
-    ]);
+    try {
+      const { action } = await inquirer.prompt([
+        {
+          type: "list",
+          name: "action",
+          message: "What do you want to do?",
+          choices: [
+            { name: "Search movies", value: "search" },
+            { name: "Browse movies", value: "browse" },
+            { name: "Trending now", value: "trending" },
+            { name: "Top rated", value: "top" },
+            { name: "Exit", value: "exit" },
+          ],
+        },
+      ]);
 
-    switch (action) {
-      case "search":
-        await searchAction();
-        break;
-      case "browse":
-        await browseMovies();
-        break;
-      case "trending":
-        await paginatedList((p) => listMovies(p, { sort_by: "like_count", order_by: "desc" }), "Trending");
-        break;
-      case "top":
-        await paginatedList((p) => listMovies(p, { sort_by: "rating", order_by: "desc", minimum_rating: 7 }), "Top Rated");
-        break;
-      case "exit":
-        console.log(chalk.dim("\n  Bye!\n"));
-        running = false;
-        break;
+      switch (action) {
+        case "search":
+          await searchAction();
+          break;
+        case "browse":
+          await browseMovies();
+          break;
+        case "trending":
+          await paginatedList((p) => listMovies(p, { sort_by: "like_count", order_by: "desc" }), "Trending");
+          break;
+        case "top":
+          await paginatedList((p) => listMovies(p, { sort_by: "rating", order_by: "desc", minimum_rating: 7 }), "Top Rated");
+          break;
+        case "exit":
+          exitGracefully();
+      }
+    } catch (err) {
+      if (isExitPromptError(err)) exitGracefully();
+      throw err;
     }
   }
 }
 
-main();
+main().catch((err) => {
+  if (isExitPromptError(err)) exitGracefully();
+  console.error(err);
+  process.exit(1);
+});
