@@ -2,10 +2,10 @@
 import chalk from "chalk";
 import inquirer from "inquirer";
 import ora from "ora";
-import WebTorrent from "webtorrent";
-import { mkdirSync, existsSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
+import { createInterface } from "readline";
+import { fileURLToPath } from "url";
 
 // --- API Layer ---
 
@@ -275,7 +275,7 @@ async function smartSearch(query: string): Promise<Movie[]> {
   return scored.slice(0, 20).map((s) => s.movie);
 }
 
-// --- Download with WebTorrent ---
+// --- Download with WebTorrent (via Node.js subprocess) ---
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -289,7 +289,8 @@ function formatSpeed(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
-function formatEta(seconds: number): string {
+function formatEta(ms: number): string {
+  const seconds = ms / 1000;
   if (!seconds || !isFinite(seconds)) return "--:--";
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -299,68 +300,69 @@ function formatEta(seconds: number): string {
 }
 
 async function downloadTorrent(magnet: string, movieTitle: string): Promise<void> {
-  if (!existsSync(DOWNLOAD_DIR)) {
-    mkdirSync(DOWNLOAD_DIR, { recursive: true });
-  }
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const helperPath = join(scriptDir, "download.mjs");
 
-  const client = new WebTorrent();
+  console.log(chalk.dim(`\n  Saving to: ${DOWNLOAD_DIR}`));
+  console.log(chalk.dim("  Connecting to peers...\n"));
 
-  return new Promise((resolve, reject) => {
-    console.log(chalk.dim(`\n  Saving to: ${DOWNLOAD_DIR}`));
-    console.log(chalk.dim("  Connecting to peers...\n"));
-
-    client.add(magnet, { path: DOWNLOAD_DIR }, (torrent) => {
-      const totalSize = formatBytes(torrent.length);
-      console.log(chalk.green(`  Downloading: ${torrent.name}`));
-      console.log(chalk.dim(`  Size: ${totalSize}\n`));
-
-      const interval = setInterval(() => {
-        const percent = (torrent.progress * 100).toFixed(1);
-        const downloaded = formatBytes(torrent.downloaded);
-        const speed = formatSpeed(torrent.downloadSpeed);
-        const eta = formatEta(torrent.timeRemaining / 1000);
-        const peers = torrent.numPeers;
-
-        const barWidth = 30;
-        const filled = Math.round(torrent.progress * barWidth);
-        const bar = chalk.green("█".repeat(filled)) + chalk.dim("░".repeat(barWidth - filled));
-
-        process.stdout.write(
-          `\r  ${bar} ${chalk.bold(percent + "%")}  ${downloaded}/${totalSize}  ${chalk.cyan(speed)}  ${chalk.dim(`ETA ${eta}`)}  ${chalk.dim(`${peers} peers`)}  `
-        );
-      }, 500);
-
-      torrent.on("done", () => {
-        clearInterval(interval);
-        process.stdout.write("\r" + " ".repeat(120) + "\r");
-        console.log(chalk.green.bold(`  Download complete!`));
-        console.log(chalk.dim(`  Saved to: ${join(DOWNLOAD_DIR, torrent.name)}\n`));
-        client.destroy();
-        resolve();
-      });
-
-      torrent.on("error", (err) => {
-        clearInterval(interval);
-        console.log(chalk.red(`\n  Download error: ${err.message}\n`));
-        client.destroy();
-        reject(err);
-      });
+  return new Promise<void>((resolve) => {
+    const child = Bun.spawn(["node", helperPath, magnet, DOWNLOAD_DIR], {
+      stdout: "pipe",
+      stderr: "inherit",
     });
 
-    client.on("error", (err) => {
-      console.log(chalk.red(`\n  Torrent error: ${err.message}\n`));
-      client.destroy();
-      reject(err);
-    });
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let totalSize = "";
 
-    // Timeout if no metadata after 30s
-    setTimeout(() => {
-      if (client.torrents.length === 0 || !client.torrents[0].ready) {
-        console.log(chalk.yellow("\n  Could not connect to peers. Try a torrent with more seeds.\n"));
-        client.destroy();
-        resolve();
+    async function readOutput() {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+
+            if (msg.type === "meta") {
+              totalSize = formatBytes(msg.size);
+              console.log(chalk.green(`  Downloading: ${msg.name}`));
+              console.log(chalk.dim(`  Size: ${totalSize}\n`));
+            } else if (msg.type === "progress") {
+              const percent = (msg.progress * 100).toFixed(1);
+              const downloaded = formatBytes(msg.downloaded);
+              const speed = formatSpeed(msg.speed);
+              const eta = formatEta(msg.eta);
+              const barWidth = 30;
+              const filled = Math.round(msg.progress * barWidth);
+              const bar = chalk.green("\u2588".repeat(filled)) + chalk.dim("\u2591".repeat(barWidth - filled));
+              process.stdout.write(
+                `\r  ${bar} ${chalk.bold(percent + "%")}  ${downloaded}/${totalSize}  ${chalk.cyan(speed)}  ${chalk.dim(`ETA ${eta}`)}  ${chalk.dim(`${msg.peers} peers`)}  `
+              );
+            } else if (msg.type === "done") {
+              process.stdout.write("\r" + " ".repeat(120) + "\r");
+              console.log(chalk.green.bold(`  Download complete!`));
+              console.log(chalk.dim(`  Saved to: ${msg.path}\n`));
+            } else if (msg.type === "error") {
+              console.log(chalk.red(`\n  Download error: ${msg.message}\n`));
+            } else if (msg.type === "timeout") {
+              console.log(chalk.yellow("\n  Could not connect to peers. Try a torrent with more seeds.\n"));
+            }
+          } catch {}
+        }
       }
-    }, 30000);
+    }
+
+    readOutput().then(() => {
+      child.exited.then(() => resolve());
+    });
   });
 }
 
