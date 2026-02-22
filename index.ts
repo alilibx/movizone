@@ -153,17 +153,17 @@ function buildMagnet(hash: string, title: string): string {
 
 function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array<number>(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i]![0] = i;
+  for (let j = 0; j <= n; j++) dp[0]![j] = j;
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1]
-        ? dp[i - 1][j - 1]
-        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      dp[i]![j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1]![j - 1]!
+        : 1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!);
     }
   }
-  return dp[m][n];
+  return dp[m]![n]!;
 }
 
 function fuzzyScore(query: string, title: string): number {
@@ -221,7 +221,7 @@ function generateTypoCorrections(word: string): string[] {
     y: "ie", z: "sx",
   };
   for (let i = 0; i < w.length; i++) {
-    const subs = similar[w[i]] || "";
+    const subs = similar[w[i]!] || "";
     for (const c of subs) {
       corrections.push(w.slice(0, i) + c + w.slice(i + 1));
     }
@@ -237,7 +237,7 @@ function generateTypoCorrections(word: string): string[] {
 }
 
 async function tryCorrections(words: string[], wordIndex: number, maxAttempts = 30): Promise<Movie[]> {
-  const corrections = generateTypoCorrections(words[wordIndex]).slice(0, maxAttempts);
+  const corrections = generateTypoCorrections(words[wordIndex]!).slice(0, maxAttempts);
 
   // Try in parallel batches of 10
   for (let i = 0; i < corrections.length; i += 10) {
@@ -504,7 +504,7 @@ function displayMovieTable(movies: Movie[]): void {
   });
 
   for (let i = 0; i < movies.length; i++) {
-    const m = movies[i];
+    const m = movies[i]!;
     const rating = m.rating ? chalk.yellow(`★ ${m.rating}`) : chalk.dim("--");
     const genres = m.genres?.slice(0, 2).join(", ") || "N/A";
     const bestTorrent = m.torrents?.reduce((best, t) => (t.seeds > (best?.seeds || 0) ? t : best), m.torrents[0]);
@@ -701,7 +701,7 @@ async function searchAction(): Promise<void> {
 
     if (action.startsWith("movie_")) {
       const idx = parseInt(action.split("_")[1]);
-      await viewMovie(movies[idx]);
+      await viewMovie(movies[idx]!);
     }
   } catch (err: any) {
     spinner.stop();
@@ -805,7 +805,7 @@ async function showSimilar(movie: Movie): Promise<void> {
 
     if (action.startsWith("movie_")) {
       const idx = parseInt(action.split("_")[1]);
-      await viewMovie(res.data.movies[idx]);
+      await viewMovie(res.data.movies[idx]!);
     }
   } catch (err: any) {
     spinner.stop();
@@ -856,7 +856,7 @@ async function paginatedList(
       else if (action === "prev") page--;
       else if (action.startsWith("movie_")) {
         const idx = parseInt(action.split("_")[1]);
-        await viewMovie(res.data.movies[idx]);
+        await viewMovie(res.data.movies[idx]!);
       }
     } catch (err: any) {
       spinner.stop();
