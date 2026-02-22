@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/npm/v/movizone?color=magenta&style=flat-square" alt="npm version" />
   <img src="https://img.shields.io/npm/l/movizone?style=flat-square" alt="license" />
-  <img src="https://img.shields.io/github/actions/workflow/status/alilibx/movizon/ci.yml?style=flat-square&label=CI" alt="CI" />
+  <img src="https://img.shields.io/github/actions/workflow/status/alilibx/movizone/ci.yml?style=flat-square&label=CI" alt="CI" />
   <img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat-square" alt="Bun" />
   <img src="https://img.shields.io/badge/73k%2B-movies-cyan?style=flat-square" alt="Movies" />
 </p>
@@ -11,17 +11,17 @@
 A beautiful terminal UI for browsing, searching, and downloading movies. Fuzzy search handles your typos, and WebTorrent downloads run right in the terminal — no external torrent client needed.
 
 ```
-╔══════════════════════════════════════════════════════════════════╗
-║                                                                  ║
-║  ███╗   ███╗ ██████╗ ██╗   ██╗██╗███████╗ ██████╗ ███╗   ██╗   ║
-║  ████╗ ████║██╔═══██╗██║   ██║██║╚══███╔╝██╔═══██╗████╗  ██║   ║
-║  ██╔████╔██║██║   ██║██║   ██║██║  ███╔╝ ██║   ██║██╔██╗ ██║   ║
-║  ██║╚██╔╝██║██║   ██║╚██╗ ██╔╝██║ ███╔╝  ██║   ██║██║╚██╗██║   ║
-║  ██║ ╚═╝ ██║╚██████╔╝ ╚████╔╝ ██║███████╗╚██████╔╝██║ ╚████║   ║
-║  ╚═╝     ╚═╝ ╚═════╝   ╚═══╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═══╝  ║
-║    Movie Explorer                                                ║
-║                                                                  ║
-╚══════════════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                                                                           ║
+║  ███╗   ███╗ ██████╗ ██╗   ██╗██╗███████╗ ██████╗ ███╗   ██╗███████╗      ║
+║  ████╗ ████║██╔═══██╗██║   ██║██║╚══███╔╝██╔═══██╗████╗  ██║██╔════╝      ║
+║  ██╔████╔██║██║   ██║██║   ██║██║  ███╔╝ ██║   ██║██╔██╗ ██║█████╗        ║
+║  ██║╚██╔╝██║██║   ██║╚██╗ ██╔╝██║ ███╔╝  ██║   ██║██║╚██╗██║██╔══╝        ║
+║  ██║ ╚═╝ ██║╚██████╔╝ ╚████╔╝ ██║███████╗╚██████╔╝██║ ╚████║███████╗      ║
+║  ╚═╝     ╚═╝ ╚═════╝   ╚═══╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝      ║
+║    Movie Explorer                                                         ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
 ## Features
@@ -56,8 +56,8 @@ bun install -g movizone
 ### From source
 
 ```bash
-git clone https://github.com/alilibx/movizon.git
-cd movizon
+git clone https://github.com/alilibx/movizone.git
+cd movizone
 bun install
 bun run index.ts
 ```
