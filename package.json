@@ -36,15 +36,14 @@
     "cli-table3": "^0.6.5",
     "figlet": "^1.10.0",
     "gradient-string": "^3.0.0",
-    "inquirer": "12",
+    "inquirer": "9",
     "ora": "8",
-    "string-width": "^8.2.0",
-    "webtorrent": "^2.8.5",
-    "wrap-ansi": "^10.0.0"
+    "webtorrent": "^2.8.5"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/figlet": "^1.7.0",
+    "@types/inquirer": "^9.0.9",
     "typescript": "^5"
   },
   "trustedDependencies": [
