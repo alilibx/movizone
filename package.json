@@ -4,7 +4,7 @@
   "description": "Movie torrent explorer CLI with fuzzy search and in-terminal downloads",
   "type": "module",
   "bin": {
-    "movizon": "./index.ts"
+    "movizone": "./index.ts"
   },
   "files": ["index.ts", "download.mjs", "README.md"],
   "scripts": {
@@ -17,7 +17,13 @@
     "cli",
     "download",
     "search",
-    "webtorrent"
+    "webtorrent",
+    "tui",
+    "terminal",
+    "streaming",
+    "magnet",
+    "yts",
+    "bun"
   ],
   "license": "MIT",
   "dependencies": {

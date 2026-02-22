@@ -16,8 +16,8 @@ import { fileURLToPath } from "url";
 const movizonGradient = gradient(["#ff00ff", "#00ffff"]);
 
 function renderHeader(): string {
-  const ascii = figlet.textSync("MOVIZON", { font: "ANSI Shadow", horizontalLayout: "fitted" });
-  return boxen(movizonGradient.multiline(ascii) + "\n" + chalk.dim("  Movie Torrent Explorer"), {
+  const ascii = figlet.textSync("MOVIZONE", { font: "ANSI Shadow", horizontalLayout: "fitted" });
+  return boxen(movizonGradient.multiline(ascii) + "\n" + chalk.dim("  Movie Explorer"), {
     padding: { top: 0, bottom: 0, left: 2, right: 2 },
     borderStyle: "double",
     borderColor: "magenta",
@@ -63,7 +63,7 @@ function navFooter(): string {
 // --- API Layer ---
 
 const API_BASE = "https://yts.torrentbay.st/api/v2";
-const DOWNLOAD_DIR = join(homedir(), "Downloads", "Movizon");
+const DOWNLOAD_DIR = join(homedir(), "Downloads", "Movizone");
 
 const TRACKERS = [
   "udp://open.demonii.com:1337/announce",
@@ -685,7 +685,7 @@ async function searchAction(): Promise<void> {
     }
 
     console.log();
-    console.log(contextBar(chalk.bold.magenta("MOVIZON"), chalk.dim(`Search: "${query}" · ${movies.length} found`)));
+    console.log(contextBar(chalk.bold.magenta("MOVIZONE"), chalk.dim(`Search: "${query}" · ${movies.length} found`)));
     displayMovieTable(movies);
     console.log(navFooter());
 
@@ -789,7 +789,7 @@ async function showSimilar(movie: Movie): Promise<void> {
     }
 
     console.log();
-    console.log(contextBar(chalk.bold.magenta("MOVIZON"), chalk.dim(`Similar to "${movie.title}"`)));
+    console.log(contextBar(chalk.bold.magenta("MOVIZONE"), chalk.dim(`Similar to "${movie.title}"`)));
     displayMovieTable(res.data.movies);
     console.log(navFooter());
 
@@ -835,7 +835,7 @@ async function paginatedList(
       }
 
       console.log();
-      console.log(contextBar(chalk.bold.magenta("MOVIZON"), chalk.dim(`${label} · Page ${page} · ${res.data.movie_count.toLocaleString()} total`)));
+      console.log(contextBar(chalk.bold.magenta("MOVIZONE"), chalk.dim(`${label} · Page ${page} · ${res.data.movie_count.toLocaleString()} total`)));
       displayMovieTable(res.data.movies);
       console.log(navFooter());
 
