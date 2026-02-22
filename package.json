@@ -1,12 +1,16 @@
 {
   "name": "movizone",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Movie torrent explorer CLI with fuzzy search and in-terminal downloads",
   "type": "module",
   "bin": {
     "movizone": "./index.ts"
   },
-  "files": ["index.ts", "download.mjs", "README.md"],
+  "files": [
+    "index.ts",
+    "download.mjs",
+    "README.md"
+  ],
   "scripts": {
     "start": "bun run index.ts",
     "typecheck": "bun x tsc --noEmit"
