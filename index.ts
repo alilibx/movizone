@@ -16,9 +16,11 @@ import { fileURLToPath } from "url";
 
 const movizonGradient = gradient(["#ff00ff", "#00ffff"]);
 
+const { version } = require("./package.json");
+
 function renderHeader(): string {
   const ascii = figlet.textSync("MOVIZONE", { font: "ANSI Shadow", horizontalLayout: "fitted" });
-  return boxen(movizonGradient.multiline(ascii) + "\n" + chalk.dim("  Movie Explorer"), {
+  return boxen(movizonGradient.multiline(ascii) + "\n" + chalk.dim(`  Movie Explorer  v${version}`), {
     padding: { top: 0, bottom: 0, left: 2, right: 2 },
     borderStyle: "double",
     borderColor: "magenta",
