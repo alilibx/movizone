@@ -1,6 +1,6 @@
 {
-  "name": "movizon",
-  "version": "1.0.0",
+  "name": "movizone",
+  "version": "1.0.1",
   "description": "Movie torrent explorer CLI with fuzzy search and in-terminal downloads",
   "type": "module",
   "bin": {
