@@ -6,6 +6,7 @@ import boxen from "boxen";
 import Table from "cli-table3";
 import figlet from "figlet";
 import gradient from "gradient-string";
+import terminalImage from "terminal-image";
 import { homedir } from "os";
 import { join, dirname } from "path";
 import { createInterface } from "readline";
@@ -143,15 +144,28 @@ async function getMovieSuggestions(movieId: number): Promise<ListResponse> {
   return apiGet("movie_suggestions.json", { movie_id: movieId });
 }
 
-function buildMagnet(hash: string, title: string): string {
+export function buildMagnet(hash: string, title: string): string {
   const dn = encodeURIComponent(title);
   const trackers = TRACKERS.map((t) => `&tr=${encodeURIComponent(t)}`).join("");
   return `magnet:?xt=urn:btih:${hash}&dn=${dn}${trackers}`;
 }
 
+// --- Poster Image ---
+
+async function fetchPosterImage(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const buffer = new Uint8Array(await res.arrayBuffer());
+    return await terminalImage.buffer(buffer, { width: 30 });
+  } catch {
+    return null;
+  }
+}
+
 // --- Fuzzy Search ---
 
-function levenshtein(a: string, b: string): number {
+export function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length;
   const dp: number[][] = Array.from({ length: m + 1 }, () => Array<number>(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i]![0] = i;
@@ -166,7 +180,7 @@ function levenshtein(a: string, b: string): number {
   return dp[m]![n]!;
 }
 
-function fuzzyScore(query: string, title: string): number {
+export function fuzzyScore(query: string, title: string): number {
   const q = query.toLowerCase().trim();
   const t = title.toLowerCase().trim();
 
@@ -197,12 +211,12 @@ function fuzzyScore(query: string, title: string): number {
   return (wordMatches / nonYearWords.length) * 80;
 }
 
-function extractYear(query: string): number | null {
+export function extractYear(query: string): number | null {
   const match = query.match(/\b(19|20)\d{2}\b/);
   return match ? parseInt(match[0]) : null;
 }
 
-function generateTypoCorrections(word: string): string[] {
+export function generateTypoCorrections(word: string): string[] {
   const corrections: string[] = [];
   const w = word.toLowerCase();
 
@@ -330,7 +344,7 @@ async function smartSearch(query: string): Promise<Movie[]> {
 
 // --- Download with WebTorrent (via Node.js subprocess) ---
 
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
@@ -338,11 +352,11 @@ function formatBytes(bytes: number): string {
   return `${(bytes / k ** i).toFixed(1)} ${sizes[i]}`;
 }
 
-function formatSpeed(bytesPerSec: number): string {
+export function formatSpeed(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
-function formatEta(ms: number): string {
+export function formatEta(ms: number): string {
   const seconds = ms / 1000;
   if (!seconds || !isFinite(seconds)) return "--:--";
   const h = Math.floor(seconds / 3600);
@@ -352,10 +366,149 @@ function formatEta(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-async function downloadTorrent(magnet: string, movieTitle: string, torrentInfo?: Torrent): Promise<void> {
-  const scriptDir = dirname(fileURLToPath(import.meta.url));
-  const helperPath = join(scriptDir, "download.mjs");
+// --- Download Manager ---
 
+interface DownloadState {
+  id: string;
+  movieTitle: string;
+  quality: string;
+  status: "connecting" | "downloading" | "done" | "error" | "timeout";
+  progress: number;
+  downloaded: number;
+  total: number;
+  speed: number;
+  eta: number;
+  peers: number;
+  filePath?: string;
+  error?: string;
+}
+
+export class DownloadManager {
+  private downloads = new Map<string, DownloadState>();
+  private processes = new Map<string, ReturnType<typeof Bun.spawn>>();
+  private idCounter = 0;
+
+  startDownload(magnet: string, movieTitle: string, torrentInfo?: Torrent): string {
+    const id = String(++this.idCounter);
+    const scriptDir = dirname(fileURLToPath(import.meta.url));
+    const helperPath = join(scriptDir, "download.mjs");
+
+    const state: DownloadState = {
+      id,
+      movieTitle,
+      quality: torrentInfo?.quality || "unknown",
+      status: "connecting",
+      progress: 0,
+      downloaded: 0,
+      total: torrentInfo?.size_bytes || 0,
+      speed: 0,
+      eta: 0,
+      peers: 0,
+    };
+    this.downloads.set(id, state);
+
+    const child = Bun.spawn(["node", helperPath, magnet, DOWNLOAD_DIR], {
+      stdout: "pipe",
+      stderr: "inherit",
+    });
+    this.processes.set(id, child);
+
+    // Start reading output in background (no await)
+    this.readOutput(id, child);
+
+    return id;
+  }
+
+  private async readOutput(id: string, child: ReturnType<typeof Bun.spawn>): Promise<void> {
+    const stdout = child.stdout as ReadableStream<Uint8Array>;
+    const reader = stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const state = this.downloads.get(id)!;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+
+            if (msg.type === "meta") {
+              state.total = msg.size;
+              state.status = "downloading";
+            } else if (msg.type === "progress") {
+              state.status = "downloading";
+              state.progress = msg.progress;
+              state.downloaded = msg.downloaded;
+              state.total = msg.total;
+              state.speed = msg.speed;
+              state.eta = msg.eta;
+              state.peers = msg.peers;
+            } else if (msg.type === "done") {
+              state.status = "done";
+              state.progress = 1;
+              state.filePath = msg.path;
+            } else if (msg.type === "error") {
+              state.status = "error";
+              state.error = msg.message;
+            } else if (msg.type === "timeout") {
+              state.status = "timeout";
+              state.error = "Could not connect to peers";
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+
+    // Ensure terminal state if process ended without explicit done/error
+    await child.exited;
+    if (state.status === "connecting" || state.status === "downloading") {
+      state.status = "error";
+      state.error = "Process ended unexpectedly";
+    }
+    this.processes.delete(id);
+  }
+
+  getDownloads(): DownloadState[] {
+    return [...this.downloads.values()];
+  }
+
+  getActive(): DownloadState[] {
+    return this.getDownloads().filter((d) => d.status === "connecting" || d.status === "downloading");
+  }
+
+  cancelDownload(id: string): void {
+    const child = this.processes.get(id);
+    if (child) {
+      child.kill();
+      this.processes.delete(id);
+    }
+    const state = this.downloads.get(id);
+    if (state && (state.status === "connecting" || state.status === "downloading")) {
+      state.status = "error";
+      state.error = "Cancelled";
+    }
+  }
+
+  clearCompleted(): void {
+    for (const [id, state] of this.downloads) {
+      if (state.status === "done" || state.status === "error" || state.status === "timeout") {
+        this.downloads.delete(id);
+      }
+    }
+  }
+}
+
+const downloadManager = new DownloadManager();
+
+async function downloadTorrent(magnet: string, movieTitle: string, torrentInfo?: Torrent): Promise<void> {
   // Movie info box
   const infoLines = [
     `${chalk.bold("Title:")}    ${chalk.white(movieTitle)}`,
@@ -372,109 +525,14 @@ async function downloadTorrent(magnet: string, movieTitle: string, torrentInfo?:
     padding: { top: 0, bottom: 0, left: 1, right: 1 },
   }));
 
-  console.log(chalk.dim("  Connecting to peers...\n"));
-
-  return new Promise<void>((resolve) => {
-    const child = Bun.spawn(["node", helperPath, magnet, DOWNLOAD_DIR], {
-      stdout: "pipe",
-      stderr: "inherit",
-    });
-
-    const reader = child.stdout.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let totalSize = "";
-    let progressLines = 0;
-
-    function renderProgress(percent: string, downloaded: string, speed: string, eta: string, peers: number, progress: number) {
-      const barWidth = 50;
-      const filled = Math.round(progress * barWidth);
-      const bar = chalk.green("█".repeat(filled)) + chalk.dim("░".repeat(barWidth - filled));
-
-      const statsTable = new Table({
-        style: { head: [], border: ["gray"], compact: true },
-        colWidths: [16, 16, 14, 12],
-      });
-      statsTable.push([
-        `${chalk.dim("Downloaded")} ${chalk.white(downloaded + "/" + totalSize)}`,
-        `${chalk.dim("Speed")} ${chalk.cyan(speed)}`,
-        `${chalk.dim("ETA")} ${chalk.white(eta)}`,
-        `${chalk.dim("Peers")} ${chalk.white(String(peers))}`,
-      ]);
-
-      const content = `  ${bar}  ${chalk.bold(percent + "%")}\n${statsTable.toString()}`;
-      const frame = boxen(content, {
-        title: chalk.bold(" Progress "),
-        titleAlignment: "left",
-        borderStyle: "round",
-        borderColor: "cyan",
-        dimBorder: true,
-        padding: { top: 0, bottom: 0, left: 0, right: 0 },
-      });
-
-      // Clear previous progress frame
-      if (progressLines > 0) {
-        process.stdout.write(`\x1b[${progressLines}A\x1b[0J`);
-      }
-      process.stdout.write(frame + "\n");
-      progressLines = frame.split("\n").length;
-    }
-
-    async function readOutput() {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line);
-
-            if (msg.type === "meta") {
-              totalSize = formatBytes(msg.size);
-              console.log(chalk.green(`  Downloading: ${msg.name}`));
-              console.log(chalk.dim(`  Size: ${totalSize}\n`));
-            } else if (msg.type === "progress") {
-              const percent = (msg.progress * 100).toFixed(1);
-              const downloaded = formatBytes(msg.downloaded);
-              const speed = formatSpeed(msg.speed);
-              const eta = formatEta(msg.eta);
-              renderProgress(percent, downloaded, speed, eta, msg.peers, msg.progress);
-            } else if (msg.type === "done") {
-              if (progressLines > 0) {
-                process.stdout.write(`\x1b[${progressLines}A\x1b[0J`);
-              }
-              console.log(boxen(
-                chalk.green.bold("  Download complete!") + "\n" + chalk.dim(`  Saved to: ${msg.path}`),
-                {
-                  borderStyle: "round",
-                  borderColor: "green",
-                  padding: { top: 0, bottom: 0, left: 0, right: 0 },
-                }
-              ));
-            } else if (msg.type === "error") {
-              console.log(chalk.red(`\n  Download error: ${msg.message}\n`));
-            } else if (msg.type === "timeout") {
-              console.log(chalk.yellow("\n  Could not connect to peers. Try a torrent with more seeds.\n"));
-            }
-          } catch {}
-        }
-      }
-    }
-
-    readOutput().then(() => {
-      child.exited.then(() => resolve());
-    });
-  });
+  downloadManager.startDownload(magnet, movieTitle, torrentInfo);
+  console.log(chalk.green("\n  Download started in background!"));
+  console.log(chalk.dim("  Check progress from the Downloads menu.\n"));
 }
 
 // --- Display Helpers ---
 
-function formatRuntime(minutes: number): string {
+export function formatRuntime(minutes: number): string {
   if (!minutes) return "N/A";
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
@@ -525,8 +583,16 @@ function displayMovieTable(movies: Movie[]): void {
   console.log(table.toString());
 }
 
-function displayMovieDetail(movie: Movie): void {
+async function displayMovieDetail(movie: Movie): Promise<void> {
   console.log();
+
+  // Poster image
+  if (movie.medium_cover_image) {
+    const poster = await fetchPosterImage(movie.medium_cover_image);
+    if (poster) {
+      console.log(poster);
+    }
+  }
 
   // Title bar
   const titleLine = chalk.bold.white(movie.title) + chalk.dim(` (${movie.year})`) + "  " + chalk.dim(movie.imdb_code);
@@ -711,7 +777,7 @@ async function searchAction(): Promise<void> {
 }
 
 async function viewMovie(movie: Movie): Promise<void> {
-  displayMovieDetail(movie);
+  await displayMovieDetail(movie);
 
   let viewing = true;
   while (viewing) {
@@ -867,6 +933,131 @@ async function paginatedList(
   }
 }
 
+// --- Downloads View ---
+
+function downloadStatusIcon(status: DownloadState["status"]): string {
+  switch (status) {
+    case "connecting": return chalk.yellow("◌");
+    case "downloading": return chalk.cyan("▼");
+    case "done": return chalk.green("✓");
+    case "error": return chalk.red("✗");
+    case "timeout": return chalk.yellow("⏱");
+  }
+}
+
+function downloadProgressBar(progress: number, width = 20): string {
+  const filled = Math.round(progress * width);
+  return chalk.green("█".repeat(filled)) + chalk.dim("░".repeat(width - filled));
+}
+
+async function viewDownloads(): Promise<void> {
+  let viewing = true;
+
+  while (viewing) {
+    const downloads = downloadManager.getDownloads();
+
+    if (!downloads.length) {
+      console.log(chalk.dim("\n  No downloads yet.\n"));
+      return;
+    }
+
+    console.log();
+
+    const table = new Table({
+      head: [
+        chalk.dim("#"),
+        chalk.bold("Title"),
+        chalk.cyan("Quality"),
+        chalk.white("Progress"),
+        chalk.cyan("Speed"),
+        chalk.white("ETA"),
+        chalk.dim("Status"),
+      ],
+      colWidths: [5, 28, 10, 28, 12, 10, 12],
+      style: { head: [], border: ["gray"], compact: false },
+      wordWrap: true,
+    });
+
+    for (let i = 0; i < downloads.length; i++) {
+      const d = downloads[i]!;
+      const pct = (d.progress * 100).toFixed(1) + "%";
+      const progressCell = d.status === "downloading"
+        ? `${downloadProgressBar(d.progress)} ${chalk.bold(pct)}`
+        : d.status === "done"
+          ? `${downloadProgressBar(1)} ${chalk.bold("100%")}`
+          : chalk.dim("--");
+      const speedCell = d.status === "downloading" ? chalk.cyan(formatSpeed(d.speed)) : chalk.dim("--");
+      const etaCell = d.status === "downloading" ? formatEta(d.eta) : chalk.dim("--");
+      const statusCell = `${downloadStatusIcon(d.status)} ${d.status === "error" || d.status === "timeout" ? chalk.red(d.error || d.status) : d.status}`;
+
+      table.push([
+        chalk.dim(`${i + 1}`),
+        chalk.white(d.movieTitle),
+        chalk.cyan(d.quality),
+        progressCell,
+        speedCell,
+        etaCell,
+        statusCell,
+      ]);
+    }
+
+    console.log(boxen(table.toString(), {
+      title: chalk.bold(" Downloads "),
+      titleAlignment: "left",
+      borderStyle: "round",
+      borderColor: "cyan",
+      dimBorder: true,
+      padding: { top: 0, bottom: 0, left: 0, right: 0 },
+    }));
+
+    // Show file paths for completed downloads
+    const completed = downloads.filter((d) => d.status === "done" && d.filePath);
+    if (completed.length) {
+      for (const d of completed) {
+        console.log(chalk.dim(`  ✓ ${d.movieTitle}: ${d.filePath}`));
+      }
+      console.log();
+    }
+
+    const choices: any[] = [];
+
+    const active = downloadManager.getActive();
+    if (active.length) {
+      for (const d of active) {
+        choices.push({
+          name: `Cancel: ${d.movieTitle} (${d.quality})`,
+          value: `cancel_${d.id}`,
+        });
+      }
+    }
+
+    const inactive = downloads.filter((d) => d.status === "done" || d.status === "error" || d.status === "timeout");
+    if (inactive.length) {
+      choices.push({ name: "Clear completed/failed", value: "clear" });
+    }
+
+    choices.push({ name: "Refresh", value: "refresh" });
+    choices.push({ name: "Back to menu", value: "back" });
+
+    const { action } = await inquirer.prompt([
+      { type: "list", name: "action", message: "Action:", choices },
+    ]);
+
+    if (action === "back") {
+      viewing = false;
+    } else if (action === "clear") {
+      downloadManager.clearCompleted();
+      console.log(chalk.dim("  Cleared.\n"));
+    } else if (action === "refresh") {
+      // loop continues, will re-render
+    } else if (action.startsWith("cancel_")) {
+      const id = action.slice(7);
+      downloadManager.cancelDownload(id);
+      console.log(chalk.yellow("  Download cancelled.\n"));
+    }
+  }
+}
+
 // --- SIGINT / Exit Handling ---
 
 function isExitPromptError(err: unknown): boolean {
@@ -890,6 +1081,11 @@ async function main(): Promise<void> {
 
   while (running) {
     try {
+      const activeCount = downloadManager.getActive().length;
+      const downloadsLabel = activeCount > 0
+        ? `Downloads (${activeCount} active)`
+        : "Downloads";
+
       const { action } = await inquirer.prompt([
         {
           type: "list",
@@ -900,6 +1096,7 @@ async function main(): Promise<void> {
             { name: "Browse movies", value: "browse" },
             { name: "Trending now", value: "trending" },
             { name: "Top rated", value: "top" },
+            { name: downloadsLabel, value: "downloads" },
             { name: "Exit", value: "exit" },
           ],
         },
@@ -918,6 +1115,9 @@ async function main(): Promise<void> {
         case "top":
           await paginatedList((p) => listMovies(p, { sort_by: "rating", order_by: "desc", minimum_rating: 7 }), "Top Rated");
           break;
+        case "downloads":
+          await viewDownloads();
+          break;
         case "exit":
           exitGracefully();
       }
@@ -928,8 +1128,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  if (isExitPromptError(err)) exitGracefully();
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err) => {
+    if (isExitPromptError(err)) exitGracefully();
+    console.error(err);
+    process.exit(1);
+  });
+}

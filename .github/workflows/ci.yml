@@ -18,4 +18,6 @@ jobs:
 
       - run: bun run typecheck
 
+      - run: bun test
+
       - run: npm pack --dry-run
