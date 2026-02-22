@@ -1,0 +1,37 @@
+{
+  "name": "movizon",
+  "version": "1.0.0",
+  "description": "Movie torrent explorer CLI with fuzzy search and in-terminal downloads",
+  "type": "module",
+  "bin": {
+    "movizon": "./index.ts"
+  },
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "keywords": [
+    "movie",
+    "torrent",
+    "cli",
+    "download",
+    "search",
+    "webtorrent"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "5",
+    "inquirer": "12",
+    "ora": "8",
+    "webtorrent": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "trustedDependencies": [
+    "node-datachannel",
+    "utp-native"
+  ]
+}
