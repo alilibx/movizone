@@ -9,6 +9,9 @@ import gradient from "gradient-string";
 import terminalImage from "terminal-image";
 import { homedir } from "os";
 import { join, dirname } from "path";
+import { readdir, rename, unlink, rm, mkdir } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
+import { spawn as nodeSpawn } from "node:child_process";
 import { createInterface } from "readline";
 import { fileURLToPath } from "url";
 
@@ -74,6 +77,7 @@ function navFooter(): string {
 
 const API_BASE = "https://yts.torrentbay.st/api/v2";
 const DOWNLOAD_DIR = join(homedir(), "Downloads", "Movizone");
+const STATE_DIR = join(DOWNLOAD_DIR, ".downloads");
 
 const TRACKERS = [
   "udp://open.demonii.com:1337/announce",
@@ -84,6 +88,16 @@ const TRACKERS = [
   "udp://torrent.gresille.org:80/announce",
   "udp://p4p.arenabg.com:1337",
   "udp://tracker.leechers-paradise.org:6969",
+];
+
+const SUBTITLE_DOMAINS = ["yts-subs.com", "yifysubtitles.ch"];
+
+const SUBTITLE_LANGUAGES = [
+  "English", "Arabic", "Spanish", "French", "German", "Portuguese",
+  "Brazilian Portuguese", "Turkish", "Italian", "Dutch", "Polish",
+  "Russian", "Chinese", "Korean", "Japanese", "Indonesian", "Romanian",
+  "Greek", "Swedish", "Norwegian", "Finnish", "Danish", "Farsi/Persian",
+  "Urdu", "Vietnamese",
 ];
 
 interface Torrent {
@@ -98,6 +112,13 @@ interface Torrent {
   video_codec: string;
   bit_depth: string;
   audio_channels: string;
+}
+
+export interface SubtitleEntry {
+  language: string;
+  release: string;
+  rating: number;
+  downloadPath: string;
 }
 
 interface Movie {
@@ -379,6 +400,8 @@ export function formatEta(ms: number): string {
 
 interface DownloadState {
   id: string;
+  pid?: number;
+  magnet?: string;
   movieTitle: string;
   quality: string;
   status: "connecting" | "downloading" | "done" | "error" | "timeout";
@@ -390,20 +413,118 @@ interface DownloadState {
   peers: number;
   filePath?: string;
   error?: string;
+  startedAt?: number;
 }
 
 export class DownloadManager {
   private downloads = new Map<string, DownloadState>();
-  private processes = new Map<string, ReturnType<typeof Bun.spawn>>();
+  private processes = new Map<string, import("node:child_process").ChildProcess>();
   private idCounter = 0;
 
+  private stateFilePath(id: string): string {
+    return join(STATE_DIR, `${id}.json`);
+  }
+
+  private writeState(state: DownloadState): void {
+    Bun.write(this.stateFilePath(state.id), JSON.stringify(state) + "\n");
+  }
+
+  private deleteStateFile(id: string): void {
+    unlink(this.stateFilePath(id)).catch(() => {});
+  }
+
+  async loadDownloads(): Promise<void> {
+    let files: string[];
+    try {
+      files = await readdir(STATE_DIR);
+    } catch {
+      return; // Directory doesn't exist yet — no prior downloads
+    }
+
+    const now = Date.now();
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+
+      try {
+        const data = await Bun.file(join(STATE_DIR, file)).json();
+        const state = data as DownloadState;
+        if (!state.id || this.downloads.has(state.id)) continue;
+
+        const isTerminal = state.status === "done" || state.status === "error" || state.status === "timeout";
+
+        // Auto-clean terminal states older than 24h
+        if (isTerminal && state.startedAt && (now - state.startedAt) > ONE_DAY) {
+          this.deleteStateFile(state.id);
+          continue;
+        }
+
+        // For active downloads, check if the process is still alive
+        if (!isTerminal && state.pid) {
+          try {
+            process.kill(state.pid, 0);
+            // Process is alive — re-read state file for latest progress
+          } catch {
+            // Process is dead
+            state.status = "error";
+            state.error = "Process ended unexpectedly";
+            this.writeState(state);
+          }
+        }
+
+        this.downloads.set(state.id, state);
+      } catch {}
+    }
+  }
+
+  /** Re-read state files for downloads without a live stdout connection (previous sessions) */
+  async refreshOrphaned(): Promise<void> {
+    for (const [id, state] of this.downloads) {
+      if (this.processes.has(id)) continue; // current session, has live stdout
+
+      const filePath = this.stateFilePath(id);
+      try {
+        const data = await Bun.file(filePath).json();
+        const fresh = data as DownloadState;
+        // Update in-memory state with latest from disk
+        state.status = fresh.status;
+        state.progress = fresh.progress;
+        state.downloaded = fresh.downloaded;
+        state.total = fresh.total;
+        state.speed = fresh.speed;
+        state.eta = fresh.eta;
+        state.peers = fresh.peers;
+        state.filePath = fresh.filePath;
+        state.error = fresh.error;
+
+        // Check if process died since last refresh
+        const isTerminal = state.status === "done" || state.status === "error" || state.status === "timeout";
+        if (!isTerminal && state.pid) {
+          try {
+            process.kill(state.pid, 0);
+          } catch {
+            state.status = "error";
+            state.error = "Process ended unexpectedly";
+            this.writeState(state);
+          }
+        }
+      } catch {}
+    }
+  }
+
   startDownload(magnet: string, movieTitle: string, torrentInfo?: Torrent): string {
-    const id = String(++this.idCounter);
+    const id = `${Date.now()}-${++this.idCounter}`;
     const scriptDir = dirname(fileURLToPath(import.meta.url));
     const helperPath = join(scriptDir, "download.mjs");
 
+    mkdirSync(STATE_DIR, { recursive: true });
+
+    const stateFile = this.stateFilePath(id);
+
     const state: DownloadState = {
       id,
+      magnet,
       movieTitle,
       quality: torrentInfo?.quality || "unknown",
       status: "connecting",
@@ -413,13 +534,20 @@ export class DownloadManager {
       speed: 0,
       eta: 0,
       peers: 0,
+      startedAt: Date.now(),
     };
     this.downloads.set(id, state);
+    this.writeState(state);
 
-    const child = Bun.spawn(["node", helperPath, magnet, DOWNLOAD_DIR], {
-      stdout: "pipe",
-      stderr: "inherit",
+    const child = nodeSpawn("node", [helperPath, magnet, DOWNLOAD_DIR, stateFile], {
+      stdio: ["ignore", "pipe", "ignore"],
+      detached: true,
     });
+    child.unref();
+
+    state.pid = child.pid;
+    this.writeState(state);
+
     this.processes.set(id, child);
 
     // Start reading output in background (no await)
@@ -428,61 +556,54 @@ export class DownloadManager {
     return id;
   }
 
-  private async readOutput(id: string, child: ReturnType<typeof Bun.spawn>): Promise<void> {
-    const stdout = child.stdout as ReadableStream<Uint8Array>;
-    const reader = stdout.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+  private readOutput(id: string, child: import("node:child_process").ChildProcess): void {
     const state = this.downloads.get(id)!;
+    let buffer = "";
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line);
-
-            if (msg.type === "meta") {
-              state.total = msg.size;
-              state.status = "downloading";
-            } else if (msg.type === "progress") {
-              state.status = "downloading";
-              state.progress = msg.progress;
-              state.downloaded = msg.downloaded;
-              state.total = msg.total;
-              state.speed = msg.speed;
-              state.eta = msg.eta;
-              state.peers = msg.peers;
-            } else if (msg.type === "done") {
-              state.status = "done";
-              state.progress = 1;
-              state.filePath = msg.path;
-            } else if (msg.type === "error") {
-              state.status = "error";
-              state.error = msg.message;
-            } else if (msg.type === "timeout") {
-              state.status = "timeout";
-              state.error = "Could not connect to peers";
-            }
-          } catch {}
-        }
+          if (msg.type === "meta") {
+            state.total = msg.size;
+            state.status = "downloading";
+          } else if (msg.type === "progress") {
+            state.status = "downloading";
+            state.progress = msg.progress;
+            state.downloaded = msg.downloaded;
+            state.total = msg.total;
+            state.speed = msg.speed;
+            state.eta = msg.eta;
+            state.peers = msg.peers;
+          } else if (msg.type === "done") {
+            state.status = "done";
+            state.progress = 1;
+            state.filePath = msg.path;
+          } else if (msg.type === "error") {
+            state.status = "error";
+            state.error = msg.message;
+          } else if (msg.type === "timeout") {
+            state.status = "timeout";
+            state.error = "Could not connect to peers";
+          }
+        } catch {}
       }
-    } catch {}
+    });
 
-    // Ensure terminal state if process ended without explicit done/error
-    await child.exited;
-    if (state.status === "connecting" || state.status === "downloading") {
-      state.status = "error";
-      state.error = "Process ended unexpectedly";
-    }
-    this.processes.delete(id);
+    child.on("close", () => {
+      if (state.status === "connecting" || state.status === "downloading") {
+        state.status = "error";
+        state.error = "Process ended unexpectedly";
+        this.writeState(state);
+      }
+      this.processes.delete(id);
+    });
   }
 
   getDownloads(): DownloadState[] {
@@ -494,15 +615,22 @@ export class DownloadManager {
   }
 
   cancelDownload(id: string): void {
+    const state = this.downloads.get(id);
+
+    // Kill via live child process handle (current session)
     const child = this.processes.get(id);
     if (child) {
       child.kill();
       this.processes.delete(id);
+    } else if (state?.pid) {
+      // Kill via PID (previous session's detached process)
+      try { process.kill(state.pid); } catch {}
     }
-    const state = this.downloads.get(id);
+
     if (state && (state.status === "connecting" || state.status === "downloading")) {
       state.status = "error";
       state.error = "Cancelled";
+      this.writeState(state);
     }
   }
 
@@ -510,8 +638,25 @@ export class DownloadManager {
     for (const [id, state] of this.downloads) {
       if (state.status === "done" || state.status === "error" || state.status === "timeout") {
         this.downloads.delete(id);
+        this.deleteStateFile(id);
       }
     }
+  }
+
+  deleteDownload(id: string): void {
+    const state = this.downloads.get(id);
+    if (!state) return;
+
+    const child = this.processes.get(id);
+    if (child) {
+      child.kill();
+      this.processes.delete(id);
+    } else if (state.pid) {
+      try { process.kill(state.pid); } catch {}
+    }
+
+    this.downloads.delete(id);
+    this.deleteStateFile(id);
   }
 }
 
@@ -538,6 +683,171 @@ async function downloadTorrent(magnet: string, movieTitle: string, torrentInfo?:
   downloadManager.startDownload(magnet, movieTitle, torrentInfo);
   console.log(chalk.green("\n  Download started in background!"));
   console.log(chalk.dim("  Check progress from the Downloads menu.\n"));
+}
+
+// --- Subtitle Downloads ---
+
+export function parseSubtitleRows(html: string): SubtitleEntry[] {
+  const entries: SubtitleEntry[] = [];
+  const rowRegex = /<tr\s+data-id="[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch: RegExpExecArray | null;
+
+  while ((rowMatch = rowRegex.exec(html)) !== null) {
+    const row = rowMatch[1]!;
+
+    const langMatch = row.match(/<span\s+class="sub-lang">([^<]+)<\/span>/);
+    const ratingMatch = row.match(/<td\s+class="rating-cell"[^>]*>\s*<span[^>]*>(\d+)<\/span>/);
+    const releaseMatch = row.match(/<td>\s*<a\s+href="[^"]*"[^>]*>\s*(?:<span[^>]*>[^<]*<\/span>\s*)?([^<]+)<\/a>/);
+    const downloadMatch = row.match(/<td\s+class="download-cell"[^>]*>\s*<a\s+href="([^"]+)"/);
+
+    if (langMatch && downloadMatch) {
+      entries.push({
+        language: langMatch[1]!.trim(),
+        release: releaseMatch?.[1]?.trim() || "",
+        rating: parseInt(ratingMatch?.[1] || "0", 10),
+        downloadPath: downloadMatch[1]!,
+      });
+    }
+  }
+
+  return entries;
+}
+
+async function fetchSubtitles(imdbCode: string): Promise<SubtitleEntry[]> {
+  for (const domain of SUBTITLE_DOMAINS) {
+    try {
+      const url = `https://${domain}/movie-imdb/${imdbCode}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const entries = parseSubtitleRows(html);
+      if (entries.length) return entries;
+    } catch {
+      continue;
+    }
+  }
+  return [];
+}
+
+export function scoreSubtitle(entry: SubtitleEntry, torrent: Torrent): number {
+  let score = entry.rating;
+  const rel = entry.release.toLowerCase();
+  if (torrent.quality && rel.includes(torrent.quality.toLowerCase())) score += 30;
+  if (torrent.type && rel.includes(torrent.type.toLowerCase())) score += 20;
+  if (rel.includes("yify") || rel.includes("yts")) score += 15;
+  return score;
+}
+
+async function downloadSubtitle(
+  entry: SubtitleEntry,
+  movieTitle: string,
+  quality: string,
+  language: string,
+): Promise<string | null> {
+  const zipUrl = `https://subtitles.yts-subs.com${entry.downloadPath}.zip`;
+  const tmpDir = join(DOWNLOAD_DIR, ".subtitle-tmp-" + Date.now());
+
+  try {
+    await mkdir(tmpDir, { recursive: true });
+    await mkdir(DOWNLOAD_DIR, { recursive: true });
+
+    const res = await fetch(zipUrl, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return null;
+
+    const zipPath = join(tmpDir, "sub.zip");
+    await Bun.write(zipPath, await res.arrayBuffer());
+
+    // Extract ZIP
+    const unzipProc = Bun.spawn(["unzip", "-o", zipPath, "-d", tmpDir], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await unzipProc.exited;
+
+    // Find .srt file
+    const files = await readdir(tmpDir);
+    const srtFile = files.find((f) => f.endsWith(".srt"));
+    if (!srtFile) return null;
+
+    const safeName = movieTitle.replace(/[^a-zA-Z0-9 ._-]/g, "");
+    const finalName = `${safeName}.${quality}.${language}.srt`;
+    const finalPath = join(DOWNLOAD_DIR, finalName);
+
+    await rename(join(tmpDir, srtFile), finalPath);
+    return finalPath;
+  } catch {
+    return null;
+  } finally {
+    try { await rm(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+async function promptSubtitleDownload(movie: Movie, torrent?: Torrent, skipConfirm = false): Promise<void> {
+  try {
+    if (!skipConfirm) {
+      const { wantSubs } = await inquirer.prompt([
+        { type: "confirm", name: "wantSubs", message: "Download subtitles?", default: false },
+      ]);
+      if (!wantSubs) return;
+    }
+
+    const spinner = ora("Fetching available subtitles...").start();
+    const allSubs = await fetchSubtitles(movie.imdb_code);
+
+    if (!allSubs.length) {
+      spinner.fail(chalk.yellow("No subtitles found for this movie."));
+      return;
+    }
+
+    // Group by language, count entries per language, sort by SUBTITLE_LANGUAGES order
+    const langMap = new Map<string, SubtitleEntry[]>();
+    for (const s of allSubs) {
+      const key = s.language;
+      if (!langMap.has(key)) langMap.set(key, []);
+      langMap.get(key)!.push(s);
+    }
+
+    const availableLangs = [...langMap.keys()].sort((a, b) => {
+      const ai = SUBTITLE_LANGUAGES.indexOf(a);
+      const bi = SUBTITLE_LANGUAGES.indexOf(b);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+
+    spinner.stop();
+
+    const { language } = await inquirer.prompt([
+      {
+        type: "list",
+        name: "language",
+        message: "Subtitle language:",
+        choices: availableLangs.map((l) => ({
+          name: `${l} (${langMap.get(l)!.length})`,
+          value: l,
+        })),
+        pageSize: 15,
+      },
+    ]);
+
+    const langSubs = langMap.get(language)!;
+
+    // Score and pick best
+    const best = langSubs
+      .map((s) => ({ entry: s, score: torrent ? scoreSubtitle(s, torrent) : s.rating }))
+      .sort((a, b) => b.score - a.score)[0]!;
+
+    const dlSpinner = ora("Downloading subtitle...").start();
+    const quality = torrent?.quality || "unknown";
+    const path = await downloadSubtitle(best.entry, movie.title, quality, language);
+
+    if (path) {
+      dlSpinner.succeed(chalk.green(`Subtitle saved: ${chalk.dim(path)}`));
+    } else {
+      dlSpinner.fail(chalk.yellow("Failed to download subtitle file."));
+    }
+  } catch (err) {
+    if (isExitPromptError(err)) return;
+    console.log(chalk.yellow("  Subtitle download skipped."));
+  }
 }
 
 // --- Display Helpers ---
@@ -803,6 +1113,7 @@ async function viewMovie(movie: Movie): Promise<void> {
     }
 
     choices.push({ name: "Copy magnet link", value: "magnet" });
+    choices.push({ name: "Download subtitles", value: "subtitles" });
     choices.push({ name: "Similar movies", value: "similar" });
     choices.push({ name: "Back", value: "back" });
 
@@ -816,11 +1127,15 @@ async function viewMovie(movie: Movie): Promise<void> {
       await showSimilar(movie);
     } else if (action === "magnet") {
       await selectTorrentAndCopyMagnet(movie);
+    } else if (action === "subtitles") {
+      await promptSubtitleDownload(movie, undefined, true);
     } else if (action.startsWith("dl_")) {
       const hash = action.slice(3);
       const torrent = movie.torrents?.find((t) => t.hash === hash);
       const magnet = buildMagnet(hash, movie.title);
       await downloadTorrent(magnet, movie.title, torrent);
+      await promptSubtitleDownload(movie, torrent);
+      viewing = false;
     }
   }
 }
@@ -960,111 +1275,238 @@ function downloadProgressBar(progress: number, width = 20): string {
   return chalk.green("█".repeat(filled)) + chalk.dim("░".repeat(width - filled));
 }
 
+function renderDownloadsScreen(downloads: DownloadState[]): void {
+  const table = new Table({
+    head: [
+      chalk.dim("#"),
+      chalk.bold("Title"),
+      chalk.cyan("Quality"),
+      chalk.white("Progress"),
+      chalk.cyan("Speed"),
+      chalk.white("ETA"),
+      chalk.dim("Status"),
+    ],
+    colWidths: [5, 28, 10, 28, 12, 10, 12],
+    style: { head: [], border: ["gray"], compact: false },
+    wordWrap: true,
+  });
+
+  for (let i = 0; i < downloads.length; i++) {
+    const d = downloads[i]!;
+    const pct = (d.progress * 100).toFixed(1) + "%";
+    const progressCell = d.status === "downloading"
+      ? `${downloadProgressBar(d.progress)} ${chalk.bold(pct)}`
+      : d.status === "done"
+        ? `${downloadProgressBar(1)} ${chalk.bold("100%")}`
+        : chalk.dim("--");
+    const speedCell = d.status === "downloading" ? chalk.cyan(formatSpeed(d.speed)) : chalk.dim("--");
+    const etaCell = d.status === "downloading" ? formatEta(d.eta) : chalk.dim("--");
+    const statusCell = `${downloadStatusIcon(d.status)} ${d.status === "error" || d.status === "timeout" ? chalk.red(d.error || d.status) : d.status}`;
+
+    table.push([
+      chalk.dim(`${i + 1}`),
+      chalk.white(d.movieTitle),
+      chalk.cyan(d.quality),
+      progressCell,
+      speedCell,
+      etaCell,
+      statusCell,
+    ]);
+  }
+
+  console.log(boxen(table.toString(), {
+    title: chalk.bold(" Downloads "),
+    titleAlignment: "left",
+    borderStyle: "round",
+    borderColor: "cyan",
+    dimBorder: true,
+    padding: { top: 0, bottom: 0, left: 0, right: 0 },
+  }));
+
+  // Show file paths for completed downloads
+  const doneWithFiles = downloads.filter((d) => d.status === "done" && d.filePath);
+  if (doneWithFiles.length) {
+    for (const d of doneWithFiles) {
+      console.log(chalk.dim(`  ✓ ${d.movieTitle}: ${d.filePath}`));
+    }
+    console.log();
+  }
+}
+
+function waitForKey(timeoutMs?: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    function cleanup() {
+      if (timer) clearTimeout(timer);
+      process.stdin.removeAllListeners("data");
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdin.pause();
+    }
+
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        cleanup();
+        resolve(null);
+      }, timeoutMs);
+    }
+
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.once("data", (data: Buffer) => {
+      cleanup();
+      resolve(data.toString());
+    });
+  });
+}
+
 async function viewDownloads(): Promise<void> {
-  let viewing = true;
-
-  while (viewing) {
+  while (true) {
     const downloads = downloadManager.getDownloads();
-
     if (!downloads.length) {
       console.log(chalk.dim("\n  No downloads yet.\n"));
       return;
     }
 
-    console.log();
-
-    const table = new Table({
-      head: [
-        chalk.dim("#"),
-        chalk.bold("Title"),
-        chalk.cyan("Quality"),
-        chalk.white("Progress"),
-        chalk.cyan("Speed"),
-        chalk.white("ETA"),
-        chalk.dim("Status"),
-      ],
-      colWidths: [5, 28, 10, 28, 12, 10, 12],
-      style: { head: [], border: ["gray"], compact: false },
-      wordWrap: true,
-    });
-
-    for (let i = 0; i < downloads.length; i++) {
-      const d = downloads[i]!;
-      const pct = (d.progress * 100).toFixed(1) + "%";
-      const progressCell = d.status === "downloading"
-        ? `${downloadProgressBar(d.progress)} ${chalk.bold(pct)}`
-        : d.status === "done"
-          ? `${downloadProgressBar(1)} ${chalk.bold("100%")}`
-          : chalk.dim("--");
-      const speedCell = d.status === "downloading" ? chalk.cyan(formatSpeed(d.speed)) : chalk.dim("--");
-      const etaCell = d.status === "downloading" ? formatEta(d.eta) : chalk.dim("--");
-      const statusCell = `${downloadStatusIcon(d.status)} ${d.status === "error" || d.status === "timeout" ? chalk.red(d.error || d.status) : d.status}`;
-
-      table.push([
-        chalk.dim(`${i + 1}`),
-        chalk.white(d.movieTitle),
-        chalk.cyan(d.quality),
-        progressCell,
-        speedCell,
-        etaCell,
-        statusCell,
-      ]);
-    }
-
-    console.log(boxen(table.toString(), {
-      title: chalk.bold(" Downloads "),
-      titleAlignment: "left",
-      borderStyle: "round",
-      borderColor: "cyan",
-      dimBorder: true,
-      padding: { top: 0, bottom: 0, left: 0, right: 0 },
-    }));
-
-    // Show file paths for completed downloads
-    const completed = downloads.filter((d) => d.status === "done" && d.filePath);
-    if (completed.length) {
-      for (const d of completed) {
-        console.log(chalk.dim(`  ✓ ${d.movieTitle}: ${d.filePath}`));
-      }
-      console.log();
-    }
-
-    const choices: any[] = [];
+    await downloadManager.refreshOrphaned();
 
     const active = downloadManager.getActive();
+    const inactive = downloads.filter((d) => d.status === "done" || d.status === "error" || d.status === "timeout");
+    const doneWithFiles = downloads.filter((d) => d.status === "done" && d.filePath);
+
+    // Clear screen and render
+    process.stdout.write("\x1b[2J\x1b[H");
+    renderDownloadsScreen(downloads);
+
+    // Key hints footer
+    const hints: string[] = [];
+    if (active.length) hints.push(chalk.bold("c") + chalk.dim(" Cancel"));
+    if (inactive.length) hints.push(chalk.bold("x") + chalk.dim(" Clear"));
+    if (doneWithFiles.length) hints.push(chalk.bold("d") + chalk.dim(" Delete file"));
+    hints.push(chalk.bold("b") + chalk.dim(" Back"));
+
+    console.log(boxen(
+      "  " + hints.join("   ") + "  ",
+      { borderStyle: "single", borderColor: "gray", dimBorder: true, padding: 0 },
+    ));
+
     if (active.length) {
-      for (const d of active) {
-        choices.push({
-          name: `Cancel: ${d.movieTitle} (${d.quality})`,
-          value: `cancel_${d.id}`,
-        });
+      console.log(chalk.dim("  Auto-refreshing..."));
+    }
+
+    // Wait for keypress (auto-refresh every 1s if active downloads)
+    const key = await waitForKey(active.length > 0 ? 1000 : undefined);
+
+    if (key === null) continue; // Timeout → auto-refresh
+
+    const k = key.charAt(0);
+
+    if (k === "b" || k === "q" || k === "\x1b") return;
+    if (k === "\x03") exitGracefully();
+
+    // Cancel active download
+    if (k === "c" && active.length) {
+      if (active.length === 1) {
+        downloadManager.cancelDownload(active[0]!.id);
+      } else {
+        const { id } = await inquirer.prompt([{
+          type: "list",
+          name: "id",
+          message: "Cancel which download?",
+          choices: [
+            ...active.map((d) => ({ name: `${d.movieTitle} (${d.quality})`, value: d.id })),
+            { name: "Never mind", value: "" },
+          ],
+        }]);
+        if (id) downloadManager.cancelDownload(id);
       }
     }
 
-    const inactive = downloads.filter((d) => d.status === "done" || d.status === "error" || d.status === "timeout");
-    if (inactive.length) {
-      choices.push({ name: "Clear completed/failed", value: "clear" });
-    }
-
-    choices.push({ name: "Refresh", value: "refresh" });
-    choices.push({ name: "Back to menu", value: "back" });
-
-    const { action } = await inquirer.prompt([
-      { type: "list", name: "action", message: "Action:", choices },
-    ]);
-
-    if (action === "back") {
-      viewing = false;
-    } else if (action === "clear") {
+    // Clear completed/failed from list
+    if (k === "x" && inactive.length) {
       downloadManager.clearCompleted();
-      console.log(chalk.dim("  Cleared.\n"));
-    } else if (action === "refresh") {
-      // loop continues, will re-render
-    } else if (action.startsWith("cancel_")) {
-      const id = action.slice(7);
-      downloadManager.cancelDownload(id);
-      console.log(chalk.yellow("  Download cancelled.\n"));
     }
+
+    // Delete completed download file from disk
+    if (k === "d" && doneWithFiles.length) {
+      if (doneWithFiles.length === 1) {
+        const d = doneWithFiles[0]!;
+        const { confirm } = await inquirer.prompt([{
+          type: "confirm",
+          name: "confirm",
+          message: `Delete "${d.movieTitle}" from disk?`,
+          default: false,
+        }]);
+        if (confirm) {
+          try {
+            await rm(d.filePath!, { recursive: true, force: true });
+            downloadManager.deleteDownload(d.id);
+          } catch (err: any) {
+            console.log(chalk.red(`  Error: ${err.message}`));
+          }
+        }
+      } else {
+        const { ids } = await inquirer.prompt([{
+          type: "checkbox",
+          name: "ids",
+          message: "Delete which files?",
+          choices: doneWithFiles.map((d) => ({
+            name: `${d.movieTitle} (${d.quality})`,
+            value: d.id,
+          })),
+        }]);
+        for (const id of ids) {
+          const d = downloads.find((dl) => dl.id === id);
+          if (d?.filePath) {
+            try {
+              await rm(d.filePath, { recursive: true, force: true });
+              downloadManager.deleteDownload(id);
+            } catch {}
+          }
+        }
+      }
+    }
+
+    // Any other key → just re-render
+  }
+}
+
+// --- Self-Update ---
+
+interface UpdateInfo {
+  latest: string;
+  current: string;
+  hasUpdate: boolean;
+}
+
+async function checkForUpdate(): Promise<UpdateInfo | null> {
+  try {
+    const res = await fetch("https://registry.npmjs.org/movizone/latest", {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { version: string };
+    const latest = data.version;
+    const current = version;
+    const hasUpdate = latest !== current;
+    return { latest, current, hasUpdate };
+  } catch {
+    return null;
+  }
+}
+
+async function runUpdate(): Promise<void> {
+  console.log(chalk.cyan("\n  Updating movizone...\n"));
+  const proc = Bun.spawn(["bun", "install", "-g", "movizone@latest"], {
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "inherit",
+  });
+  const code = await proc.exited;
+  if (code === 0) {
+    console.log(chalk.green("\n  Updated successfully! Restart movizone to use the new version.\n"));
+  } else {
+    console.log(chalk.red("\n  Update failed. Try manually: bun install -g movizone@latest\n"));
   }
 }
 
@@ -1082,6 +1524,8 @@ function exitGracefully(): never {
 // --- Main ---
 
 async function main(): Promise<void> {
+  const updateCheck = checkForUpdate(); // start fetch immediately
+
   console.log();
   console.log(renderHeader());
   console.log(chalk.dim(`  Downloads: ${DOWNLOAD_DIR}`));
@@ -1091,7 +1535,24 @@ async function main(): Promise<void> {
     dimBorder: true,
     padding: { top: 0, bottom: 0, left: 1, right: 1 },
   }));
+
+  const update = await updateCheck; // already in-flight
+  if (update?.hasUpdate) {
+    console.log(boxen(
+      chalk.dim(`Current: v${update.current}`) + "  →  " + chalk.green.bold(`v${update.latest} available`),
+      {
+        title: chalk.yellow.bold(" Update Available "),
+        titleAlignment: "center",
+        borderStyle: "round",
+        borderColor: "yellow",
+        padding: { top: 0, bottom: 0, left: 1, right: 1 },
+      },
+    ));
+  }
+
   console.log();
+
+  await downloadManager.loadDownloads();
 
   let running = true;
 
@@ -1102,19 +1563,24 @@ async function main(): Promise<void> {
         ? `Downloads (${activeCount} active)`
         : "Downloads";
 
+      const choices: { name: string; value: string }[] = [
+        { name: "Search movies", value: "search" },
+        { name: "Browse movies", value: "browse" },
+        { name: "Trending now", value: "trending" },
+        { name: "Top rated", value: "top" },
+        { name: downloadsLabel, value: "downloads" },
+      ];
+      if (update?.hasUpdate) {
+        choices.push({ name: chalk.yellow(`Update available (v${update.latest})`), value: "update" });
+      }
+      choices.push({ name: "Exit", value: "exit" });
+
       const { action } = await inquirer.prompt([
         {
           type: "list",
           name: "action",
           message: "What do you want to do?",
-          choices: [
-            { name: "Search movies", value: "search" },
-            { name: "Browse movies", value: "browse" },
-            { name: "Trending now", value: "trending" },
-            { name: "Top rated", value: "top" },
-            { name: downloadsLabel, value: "downloads" },
-            { name: "Exit", value: "exit" },
-          ],
+          choices,
         },
       ]);
 
@@ -1133,6 +1599,9 @@ async function main(): Promise<void> {
           break;
         case "downloads":
           await viewDownloads();
+          break;
+        case "update":
+          await runUpdate();
           break;
         case "exit":
           exitGracefully();

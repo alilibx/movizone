@@ -10,7 +10,10 @@ import {
   extractYear,
   generateTypoCorrections,
   DownloadManager,
+  parseSubtitleRows,
+  scoreSubtitle,
 } from "./index.ts";
+import type { SubtitleEntry } from "./index.ts";
 
 // --- formatBytes ---
 
@@ -218,5 +221,110 @@ describe("DownloadManager", () => {
     const dm = new DownloadManager();
     dm.clearCompleted();
     expect(dm.getDownloads()).toEqual([]);
+  });
+});
+
+// --- parseSubtitleRows ---
+
+describe("parseSubtitleRows", () => {
+  const sampleHTML = `
+<tr data-id="250883" class="high-rating">
+  <td class="rating-cell"><span class="label label-success">3</span></td>
+  <td class="flag-cell"><span class="sub-lang">Arabic</span></td>
+  <td><a href="/subtitles/inception-2010-arabic-yify-90032">
+      <span class="text-muted">subtitle</span> Inception 2010 720p BrRip x264 YIFY</a></td>
+  <td class="uploader-cell">sub</td>
+  <td class="download-cell">
+    <a href="/subtitles/inception-2010-arabic-yify-90033" class="subtitle-download">download</a>
+  </td>
+</tr>
+<tr data-id="250884" class="">
+  <td class="rating-cell"><span class="label label-info">1</span></td>
+  <td class="flag-cell"><span class="sub-lang">English</span></td>
+  <td><a href="/subtitles/inception-2010-english-yify-90034">
+      <span class="text-muted">subtitle</span> Inception 2010 1080p BluRay x264 YTS</a></td>
+  <td class="uploader-cell">admin</td>
+  <td class="download-cell">
+    <a href="/subtitles/inception-2010-english-yify-90035" class="subtitle-download">download</a>
+  </td>
+</tr>`;
+
+  test("parses multiple rows from HTML", () => {
+    const entries = parseSubtitleRows(sampleHTML);
+    expect(entries).toHaveLength(2);
+  });
+
+  test("extracts language correctly", () => {
+    const entries = parseSubtitleRows(sampleHTML);
+    expect(entries[0]!.language).toBe("Arabic");
+    expect(entries[1]!.language).toBe("English");
+  });
+
+  test("extracts rating correctly", () => {
+    const entries = parseSubtitleRows(sampleHTML);
+    expect(entries[0]!.rating).toBe(3);
+    expect(entries[1]!.rating).toBe(1);
+  });
+
+  test("extracts release text", () => {
+    const entries = parseSubtitleRows(sampleHTML);
+    expect(entries[0]!.release).toContain("Inception 2010 720p");
+    expect(entries[1]!.release).toContain("1080p BluRay");
+  });
+
+  test("extracts download path", () => {
+    const entries = parseSubtitleRows(sampleHTML);
+    expect(entries[0]!.downloadPath).toBe("/subtitles/inception-2010-arabic-yify-90033");
+    expect(entries[1]!.downloadPath).toBe("/subtitles/inception-2010-english-yify-90035");
+  });
+
+  test("returns empty array for no matches", () => {
+    expect(parseSubtitleRows("<html><body>No subs</body></html>")).toEqual([]);
+  });
+});
+
+// --- scoreSubtitle ---
+
+describe("scoreSubtitle", () => {
+  const baseTorrent = {
+    url: "", hash: "abc", quality: "1080p", type: "BluRay",
+    seeds: 100, peers: 50, size: "1.5 GB", size_bytes: 1500000000,
+    video_codec: "x264", bit_depth: "8", audio_channels: "2.0",
+  };
+
+  test("includes entry rating in score", () => {
+    const entry: SubtitleEntry = { language: "English", release: "Random Sub", rating: 5, downloadPath: "/sub" };
+    expect(scoreSubtitle(entry, baseTorrent)).toBe(5);
+  });
+
+  test("adds 30 for matching quality", () => {
+    const entry: SubtitleEntry = { language: "English", release: "Movie 1080p BrRip", rating: 2, downloadPath: "/sub" };
+    expect(scoreSubtitle(entry, baseTorrent)).toBe(2 + 30);
+  });
+
+  test("adds 20 for matching type", () => {
+    const entry: SubtitleEntry = { language: "English", release: "Movie BluRay Sub", rating: 1, downloadPath: "/sub" };
+    expect(scoreSubtitle(entry, baseTorrent)).toBe(1 + 20);
+  });
+
+  test("adds 15 for YIFY/YTS tag", () => {
+    const entry: SubtitleEntry = { language: "English", release: "Movie YIFY", rating: 0, downloadPath: "/sub" };
+    expect(scoreSubtitle(entry, baseTorrent)).toBe(15);
+  });
+
+  test("stacks all bonuses", () => {
+    const entry: SubtitleEntry = {
+      language: "English",
+      release: "Movie 1080p BluRay x264 YIFY",
+      rating: 3,
+      downloadPath: "/sub",
+    };
+    // 3 (rating) + 30 (quality) + 20 (type) + 15 (YIFY)
+    expect(scoreSubtitle(entry, baseTorrent)).toBe(68);
+  });
+
+  test("case insensitive matching", () => {
+    const entry: SubtitleEntry = { language: "English", release: "movie 1080P bluray yts", rating: 1, downloadPath: "/sub" };
+    expect(scoreSubtitle(entry, baseTorrent)).toBe(1 + 30 + 20 + 15);
   });
 });
