@@ -28,6 +28,13 @@ function renderHeader(): string {
   });
 }
 
+const DISCLAIMER = chalk.yellow("Disclaimer: ") + chalk.dim(
+  "This is a hobby project for educational purposes only. " +
+  "The developers do not host, distribute, or endorse any copyrighted content. " +
+  "Downloading copyrighted material without authorization may be illegal in your jurisdiction. " +
+  "You are solely responsible for ensuring your use complies with applicable laws."
+);
+
 function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
@@ -527,6 +534,7 @@ async function downloadTorrent(magnet: string, movieTitle: string, torrentInfo?:
     padding: { top: 0, bottom: 0, left: 1, right: 1 },
   }));
 
+  console.log(chalk.yellow("  Note: ") + chalk.dim("Ensure you have the right to download this content in your jurisdiction."));
   downloadManager.startDownload(magnet, movieTitle, torrentInfo);
   console.log(chalk.green("\n  Download started in background!"));
   console.log(chalk.dim("  Check progress from the Downloads menu.\n"));
@@ -1077,6 +1085,12 @@ async function main(): Promise<void> {
   console.log();
   console.log(renderHeader());
   console.log(chalk.dim(`  Downloads: ${DOWNLOAD_DIR}`));
+  console.log(boxen(DISCLAIMER, {
+    borderStyle: "round",
+    borderColor: "yellow",
+    dimBorder: true,
+    padding: { top: 0, bottom: 0, left: 1, right: 1 },
+  }));
   console.log();
 
   let running = true;

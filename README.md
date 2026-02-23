@@ -176,6 +176,16 @@ Filter by genre and sort order, with pagination:
 
 - [Bun](https://bun.sh) v1.0+ (or Node.js 18+ via npx)
 
+## Disclaimer
+
+> **This is a hobby project built for educational and informational purposes only.**
+>
+> The developers of Movizone do not host, store, distribute, or endorse any copyrighted content. This tool interfaces with publicly available third-party APIs; the developers have no control over the content indexed by those services.
+>
+> Torrent magnet links may point to copyrighted material. Downloading copyrighted content without proper authorization may be illegal in your jurisdiction. **You are solely responsible** for ensuring that your use of this tool complies with all applicable laws and regulations.
+>
+> This project is not intended to facilitate or encourage copyright infringement. The developers assume no liability for how this tool is used. Use at your own risk.
+
 ## License
 
 MIT
