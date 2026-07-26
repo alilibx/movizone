@@ -75,7 +75,7 @@ function navFooter(): string {
 
 // --- API Layer ---
 
-const API_BASE = "https://yts.torrentbay.st/api/v2";
+const API_BASE = "https://movies-api.accel.li/api/v2";
 const DOWNLOAD_DIR = join(homedir(), "Downloads", "Movizone");
 const STATE_DIR = join(DOWNLOAD_DIR, ".downloads");
 
